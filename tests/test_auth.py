@@ -16,6 +16,17 @@ def test_unknown_when_no_marker_matches():
     assert _classify("Welcome", config) == "unknown"
 
 
+def test_classifies_by_url_when_marker_is_absent():
+    config = PortalConfig(
+        success_markers=("logout",),
+        failure_markers=("invalid password",),
+        success_url_tokens=("/portal/home",),
+        failure_url_tokens=("/login",),
+    )
+    assert _classify("Welcome", config, "https://example.com/portal/home") == "authenticated"
+    assert _classify("Welcome", config, "https://example.com/login?error=1") == "unauthenticated"
+
+
 def test_rejects_non_https_url():
     config = PortalConfig(login_url="http://example.com", status_url="https://example.com")
     try:

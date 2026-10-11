@@ -1,7 +1,11 @@
 import argparse
 import sys
 from PySide6.QtWidgets import QApplication
-from .gui import MainWindow
+
+if __package__:
+    from .gui import MainWindow
+else:
+    from netaccess.gui import MainWindow
 
 
 def main():

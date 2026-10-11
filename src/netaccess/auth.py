@@ -10,6 +10,14 @@ import requests
 Outcome = Literal["authenticated", "unauthenticated", "unknown"]
 
 
+def _as_tokens(values: tuple[str, ...] | list[str] | str | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        return tuple(part.strip() for part in values.split(",") if part.strip())
+    return tuple(part.strip() for part in values if part and part.strip())
+
+
 @dataclass(frozen=True)
 class PortalConfig:
     login_url: str = "https://netaccess.iitism.ac.in:6082/"
@@ -21,6 +29,8 @@ class PortalConfig:
         "invalid username", "invalid password", "authentication failed",
         "incorrect password", "login failed",
     )
+    success_url_tokens: tuple[str, ...] = ("logout", "log out", "sign out", "portal/home")
+    failure_url_tokens: tuple[str, ...] = ("login", "signin", "auth", "error")
 
     def validate(self) -> None:
         for label, value in (("Login URL", self.login_url), ("Status URL", self.status_url)):
@@ -39,30 +49,49 @@ class AuthResult:
     final_url: str | None = None
 
 
-def _classify(body: str, config: PortalConfig) -> Outcome:
+def _contains_any(candidate: str, tokens: tuple[str, ...]) -> bool:
+    lowered = candidate.casefold()
+    return any(token.casefold() in lowered for token in tokens if token.strip())
+
+
+def _classify(body: str, config: PortalConfig, url: str | None = None) -> Outcome:
     text = body.casefold()
-    if any(marker.casefold() in text for marker in config.failure_markers if marker.strip()):
+    if _contains_any(text, _as_tokens(config.failure_markers)):
         return "unauthenticated"
-    if any(marker.casefold() in text for marker in config.success_markers if marker.strip()):
+
+    if url:
+        normalized_url = url.casefold()
+        if _contains_any(normalized_url, _as_tokens(config.success_url_tokens)):
+            return "authenticated"
+        if _contains_any(normalized_url, _as_tokens(config.failure_url_tokens)):
+            return "unauthenticated"
+
+    if _contains_any(text, _as_tokens(config.success_markers)):
         return "authenticated"
+
+    # A portal login page normally shows the form or a challenge, while a logged-in
+    # page tends to expose a logout/sign-out affordance or a status endpoint.
+    if url and any(fragment in url.casefold() for fragment in ("/login", "/signin", "login?", "signin?")):
+        return "unauthenticated"
+
     return "unknown"
 
 
 def check_status(config: PortalConfig, timeout: float = 12) -> AuthResult:
-    """Check status without persisting cookies; markers are only heuristics."""
+    """Check status without persisting cookies; classification combines markers and URL hints."""
     config.validate()
     try:
         with requests.Session() as session:
             response = session.get(config.status_url, timeout=timeout, allow_redirects=True)
             if response.status_code >= 500:
                 return AuthResult("unknown", f"Portal returned HTTP {response.status_code}.", response.status_code, response.url)
-            outcome = _classify(response.text, config)
+            outcome = _classify(response.text, config, response.url)
             if outcome == "unknown" and response.status_code >= 400:
                 return AuthResult("unknown", f"Status check returned HTTP {response.status_code}.", response.status_code, response.url)
             messages = {
-                "authenticated": "The response contains a configured signed-in marker; verify it matches the portal.",
-                "unauthenticated": "The response contains a configured login/failure marker.",
-                "unknown": "Could not determine login state from the response. Configure reliable status markers/URL.",
+                "authenticated": "The response matches a configured signed-in marker or authenticated URL pattern.",
+                "unauthenticated": "The response matches a configured login/failure marker or unauthenticated URL pattern.",
+                "unknown": "Could not determine login state from the response. Configure reliable status markers/URL hints.",
             }
             return AuthResult(outcome, messages[outcome], response.status_code, response.url)
     except requests.RequestException as exc:
@@ -88,15 +117,15 @@ def login(config: PortalConfig, username: str, password: str, timeout: float = 1
             )
             if response.status_code >= 500:
                 return AuthResult("unknown", f"Portal returned HTTP {response.status_code}.", response.status_code, response.url)
-            outcome = _classify(response.text, config)
+            outcome = _classify(response.text, config, response.url)
             if outcome == "authenticated":
-                message = "Login appears successful based on a configured response marker."
+                message = "Login appears successful based on a configured response marker or authenticated URL pattern."
             elif outcome == "unauthenticated":
-                message = "Login appears to have failed based on a configured response marker."
+                message = "Login appears to have failed based on a configured response marker or login-page redirect."
             else:
                 message = (
                     "Request completed, but authentication is unconfirmed. Configure the actual "
-                    "portal endpoint/form fields and reliable response markers. HTTP 200 alone is not proof."
+                    "portal endpoint/form fields and reliable response markers or URL hints. HTTP 200 alone is not proof."
                 )
             return AuthResult(outcome, message, response.status_code, response.url)
     except requests.RequestException as exc:
